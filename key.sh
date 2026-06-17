@@ -20,6 +20,7 @@ umask 077
 #   3. Enable public-key SSH login.
 #   4. Disable password and keyboard-interactive SSH login.
 #   5. Print the private key so you can save it locally.
+#   6. Delete the temporary key files from the VPS when the script exits.
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 MANAGED_BEGIN="# BEGIN managed by VPSScript key.sh"
@@ -46,6 +47,28 @@ die() {
   printf '[ERROR] %s\n' "$*" >&2
   exit 1
 }
+
+cleanup_key_dir() {
+  local exit_code=$?
+
+  if [[ -n "${KEY_DIR:-}" && "${KEY_DIR}" == /tmp/vps-ssh-key.* && -d "${KEY_DIR}" ]]; then
+    if [[ -n "${PRIVATE_KEY_PATH:-}" && -f "${PRIVATE_KEY_PATH}" ]]; then
+      if command -v shred >/dev/null 2>&1; then
+        shred -u "${PRIVATE_KEY_PATH}" 2>/dev/null || rm -f "${PRIVATE_KEY_PATH}"
+      else
+        rm -f "${PRIVATE_KEY_PATH}"
+      fi
+    fi
+
+    [[ -n "${PUBLIC_KEY_PATH:-}" && -f "${PUBLIC_KEY_PATH}" ]] && rm -f "${PUBLIC_KEY_PATH}"
+    rmdir "${KEY_DIR}" 2>/dev/null || rm -rf "${KEY_DIR}"
+
+    if [[ "${exit_code}" -eq 0 ]]; then
+      info "Deleted temporary SSH key files from VPS"
+    fi
+  fi
+}
+trap cleanup_key_dir EXIT
 
 require_root() {
   [[ "${EUID}" -eq 0 ]] || die "Please run as root, for example: sudo ./key.sh root"
@@ -80,7 +103,7 @@ find_sshd() {
 
 ensure_user() {
   if id "${TARGET_USER}" >/dev/null 2>&1; then
-    return
+    return 0
   fi
 
   [[ "${CREATE_USER}" == "1" ]] || die "User ${TARGET_USER} does not exist. Use CREATE_USER=1 to create it."
@@ -174,6 +197,7 @@ write_sshd_config() {
   {
     printf '%s\n' "${MANAGED_BEGIN}"
     printf '%s\n' "PubkeyAuthentication yes"
+    printf '%s\n' "AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2"
     printf '%s\n' "PasswordAuthentication no"
     printf '%s\n' "KbdInteractiveAuthentication no"
     printf '%s\n' "ChallengeResponseAuthentication no"
@@ -215,25 +239,26 @@ validate_sshd_config() {
       cp -a "${BACKUP}" "${SSHD_CONFIG}"
       die "Effective config check failed: KbdInteractiveAuthentication is still yes. Rolled back."
     fi
+
+    echo "${effective}" | grep -q '^authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2$' || {
+      cp -a "${BACKUP}" "${SSHD_CONFIG}"
+      die "Effective config check failed: AuthorizedKeysFile is not the expected default path. Rolled back."
+    }
   fi
 
   info "sshd config validation passed"
 }
 
 reload_ssh() {
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl reload ssh 2>/dev/null \
-      || systemctl reload sshd 2>/dev/null \
-      || systemctl restart ssh 2>/dev/null \
-      || systemctl restart sshd 2>/dev/null \
-      || die "Failed to reload/restart SSH service"
-  else
-    service ssh reload 2>/dev/null \
-      || service sshd reload 2>/dev/null \
-      || service ssh restart 2>/dev/null \
-      || service sshd restart 2>/dev/null \
-      || die "Failed to reload/restart SSH service"
-  fi
+  systemctl reload ssh 2>/dev/null \
+    || systemctl reload sshd 2>/dev/null \
+    || systemctl restart ssh 2>/dev/null \
+    || systemctl restart sshd 2>/dev/null \
+    || service ssh reload 2>/dev/null \
+    || service sshd reload 2>/dev/null \
+    || service ssh restart 2>/dev/null \
+    || service sshd restart 2>/dev/null \
+    || die "Failed to reload/restart SSH service"
 
   info "SSH service reloaded"
 }
@@ -277,8 +302,8 @@ That password-only test should fail.
 Temporary key directory on VPS:
   ${KEY_DIR}
 
-After saving the private key locally and confirming login works, remove it from VPS:
-  rm -rf '${KEY_DIR}'
+The temporary private key file will be deleted automatically when this script exits.
+If you lose this terminal output, rerun the script to generate a new key pair.
 
 SSH config backup:
   ${BACKUP}
