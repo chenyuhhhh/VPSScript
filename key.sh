@@ -90,8 +90,8 @@ ensure_user() {
 }
 
 maybe_add_sudo() {
-  [[ "${ADD_SUDO}" == "1" ]] || return
-  [[ "${TARGET_USER}" != "root" ]] || return
+  [[ "${ADD_SUDO}" == "1" ]] || return 0
+  [[ "${TARGET_USER}" != "root" ]] || return 0
 
   if getent group sudo >/dev/null 2>&1; then
     usermod -aG sudo "${TARGET_USER}"
